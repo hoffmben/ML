@@ -1,0 +1,316 @@
+---
+title: "Employee Attrition Example"
+output:
+  rmdformats::material:
+    cards: false
+    css: header.css
+  html_notebook:
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+# Include magrittr pipe
+`%>%` <- magrittr::`%>%`
+
+employee_attrition_raw <- readr::read_csv('../data/WA_Fn-UseC_-HR-Employee-Attrition.csv')
+```
+
+# Introduction
+
+# EDA
+
+```{r head table, results='asis', warning=FALSE}
+employee_attrition_raw %>% 
+  head(10) %>% 
+  knitr::kable(format = 'html') %>% 
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(width = "100%", height = "750px")
+```
+
+```{r data mutate, warning=FALSE}
+# Change to factors
+
+employee_attrition <- employee_attrition_raw %>% 
+  dplyr::mutate_if(is.character, as.factor) %>% 
+  dplyr::select(Attrition, dplyr::everything())
+```
+
+```{r check results}
+tibble::glimpse(employee_attrition, width = 100)
+```
+
+# Model Setup
+
+```{r h2o init}
+h2o::h2o.init()
+```
+
+```{r h2o settings}
+h2o::h2o.no_progress()
+```
+
+```{r split data}
+employee_attrition_h2o <- h2o::as.h2o(employee_attrition)
+
+split_h2o <- h2o::h2o.splitFrame(employee_attrition_h2o, c(0.7, 0.15), seed = 1234)
+
+train_h2o <- h2o::h2o.assign(split_h2o[[1]], "train")
+valid_h2o <- h2o::h2o.assign(split_h2o[[2]], "valid")
+test_h2o <- h2o::h2o.assign(split_h2o[[3]], "test")
+```
+
+```{r feature setup}
+y <- "Attrition"
+x <- setdiff(names(train_h2o), y)
+```
+
+```{r model, warning=FALSE}
+automl_models_h2o <- h2o::h2o.automl(
+  x = x,
+  y = y,
+  training_frame = train_h2o,
+  leaderboard_frame = valid_h2o,
+  max_runtime_secs = 30
+)
+
+automl_leader <- automl_models_h2o@leader
+```
+
+# Evaluation
+
+```{r predict}
+pred_h2o <- h2o::h2o.predict(object = automl_leader, newdata = test_h2o)
+```
+
+```{r evaluation}
+test_performance <- test_h2o %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(Attrition) %>% 
+  dplyr::mutate(pred = as.vector(pred_h2o$predict)) %>% 
+  dplyr::mutate_if(is.character, as.factor)
+
+test_performance
+```
+
+```{r confusion matrix}
+confusion_matrix <- test_performance %>% 
+  table()
+
+confusion_matrix
+```
+
+```{r performance}
+tn <- confusion_matrix[1]
+tp <- confusion_matrix[4]
+fp <- confusion_matrix[3]
+fn <- confusion_matrix[2]
+
+accuracy <- (tp + tn) / (tp + tn + fp + fn)
+misclassification_rate <- 1 - accuracy
+recall <- tp / (tp + fn)
+precision <- tp / (tp + fp)
+null_error_rate <- tn / (tp + tn + fp + fn)
+
+tibble::tibble(
+  accuracy,
+  misclassification_rate,
+  recall,
+  precision,
+  null_error_rate
+) %>% 
+  t()
+```
+
+# GLMNET Comparison
+
+```{r glm split}
+x_train <- as.data.frame(train_h2o[x][, -c(21)])
+y_train <- as.data.frame(train_h2o[y])$Attrition
+
+x_test <- as.data.frame(test_h2o[x][, -c(21)])
+y_test <- as.data.frame(test_h2o[y])$Attrition
+```
+
+```{r variable format}
+x_train <- model.matrix(~.-1, x_train)
+
+x_test <- model.matrix(~.-1, x_test)
+```
+
+```{r glm model}
+attrition_model_ridge <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
+                                           family = "binomial", 
+                                           alpha = 0,
+                                           type.measure = "mse"
+                                           )
+
+attrition_model_elastic <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
+                                             family = "binomial", 
+                                             alpha = 0.5,
+                                             type.measure = "mse"
+                                             )
+
+attrition_model_lasso <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
+                                           family = "binomial", 
+                                           alpha = 1,
+                                           type.measure = "mse"
+                                           )
+```
+
+```{r glm evaluation}
+attrition_ridge_pred <- predict(attrition_model_ridge, 
+                                s = "lambda.min",
+                                newx = x_test,
+                                type = "class"
+                                )
+
+attrition_elastic_pred <- predict(attrition_model_elastic, 
+                                  s = "lambda.min",
+                                  newx = x_test,
+                                  type = "class"
+                                  )
+
+attrition_lasso_pred <- predict(attrition_model_lasso, 
+                                  s = "lambda.min",
+                                  newx = x_test,
+                                  type = "class"
+                                  )
+```
+
+```{r performance function}
+perfomance <- function(confusion_matrix) {
+  tn <- confusion_matrix[1]
+  tp <- confusion_matrix[4]
+  fp <- confusion_matrix[3]
+  fn <- confusion_matrix[2]
+  
+  accuracy <- (tp + tn) / (tp + tn + fp + fn)
+  misclassification_rate <- 1 - accuracy
+  recall <- tp / (tp + fn)
+  precision <- tp / (tp + fp)
+  null_error_rate <- tn / (tp + tn + fp + fn)
+  
+  tibble::tibble(
+    accuracy,
+    misclassification_rate,
+    recall,
+    precision,
+    null_error_rate
+  ) %>% 
+    t()
+}
+```
+
+
+```{r ridge confusion}
+ridge_confusion <- table(y_test, attrition_ridge_pred, dnn = c("Attrition", "Prediction"))
+ridge_confusion
+```
+
+```{r ridge performance}
+perfomance(ridge_confusion)
+```
+
+
+```{r elastic confusion}
+elastic_confusion <- table(y_test, attrition_elastic_pred, dnn = c("Attrition", "Prediction"))
+elastic_confusion
+```
+
+```{r elastic performance}
+perfomance(elastic_confusion)
+```
+
+```{r lasso confusion}
+lasso_confusion <- table(y_test, attrition_lasso_pred, dnn = c("Attrition", "Prediction"))
+lasso_confusion
+```
+
+```{r lasso performance}
+perfomance(lasso_confusion)
+```
+
+# Feature Importance
+
+```{r lime setup, warning=FALSE}
+require('lime')
+model_type.H2OBinomialModel <- function(x, ...) return('classification')
+
+predict_model.H2OBinomialModel <- function(x, newdata, type, ...) {
+  pred <- h2o::h2o.predict(x, h2o::as.h2o(newdata))
+  
+  return(as.data.frame(pred[, -1]))
+  
+}
+```
+
+```{r prediction test}
+predict_model(x = automl_leader, newdata = as.data.frame(test_h2o[, -1]), type = 'raw') %>% 
+  tibble::as_tibble()
+```
+
+```{r explainer, warning=FALSE}
+explainer <- lime::lime(
+  as.data.frame(train_h2o[, -1]),
+  model = automl_leader,
+  bin_continuous = FALSE
+)
+```
+
+```{r explanation, warning=FALSE}
+explanation <- lime::explain(
+  as.data.frame(test_h2o[1:10, -1]),
+  explainer = explainer,
+  n_labels = 1,
+  n_features = 4,
+  kernel_width = 0.5
+)
+```
+
+```{r feature importance, fig.height=10, fig.width=10}
+lime::plot_features(explanation) + 
+  ggplot2::labs(title = "Employee Attrition Prediction: Feature Importance",
+       subtitle = "First 10 Cases From Test Set") 
+```
+
+# Feature Evaluation
+
+```{r critical features}
+attrition_critical_features <- employee_attrition %>% 
+  tibble::as_tibble() %>% 
+  dplyr::select(Attrition, TrainingTimesLastYear, JobRole, OverTime) %>% 
+  dplyr::mutate(Case = dplyr::row_number()) %>% 
+  dplyr::select(Case, dplyr::everything())
+
+attrition_critical_features
+```
+
+```{r training plot, fig.height=6, fig.width=8}
+attrition_critical_features %>% 
+  ggplot2::ggplot(ggplot2::aes(Attrition, TrainingTimesLastYear)) +
+  ggplot2::geom_violin(trim=TRUE) +
+  ggplot2::geom_jitter(shape = 16, position = ggplot2::position_jitter(0.4))
+```
+
+```{r overtime plot, fig.height=6, fig.width=8}
+attrition_critical_features %>% 
+  dplyr::mutate(OverTime = ifelse(OverTime == 'Yes', 1, 0)) %>% 
+  ggplot2::ggplot(ggplot2::aes(Attrition, OverTime)) +
+  ggplot2::geom_violin(trim=TRUE) +
+  ggplot2::geom_jitter(shape = 16, position = ggplot2::position_jitter(0.4))
+```
+
+
+```{r job role plot, fig.height=6, fig.width=8}
+attrition_critical_features %>% 
+  dplyr::group_by(JobRole, Attrition) %>% 
+  dplyr::summarise(n = dplyr::n()) %>% 
+  dplyr::mutate(freq = n / sum(n)) %>%
+  dplyr::filter(Attrition == 'Yes') %>% 
+  ggplot2::ggplot(ggplot2::aes(forcats::fct_reorder(JobRole, freq), freq)) +
+  ggplot2::geom_bar(stat = 'identity') +
+  ggplot2::coord_flip() +
+  ggplot2::ylim(0, 1) + 
+  ggplot2::ylab("Attrition Percentage (Yes / Total)") +
+  ggplot2::xlab("JobRole")
+```

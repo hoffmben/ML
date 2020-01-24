@@ -1,0 +1,6 @@
+.header-panel {
+  background-color: #5275e0;
+  min-height: 144px;
+  position: relative;
+  z-index: 3;
+}
