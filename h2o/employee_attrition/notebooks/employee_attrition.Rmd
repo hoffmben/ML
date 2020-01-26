@@ -17,7 +17,32 @@ employee_attrition_raw <- readr::read_csv('../data/WA_Fn-UseC_-HR-Employee-Attri
 
 # Introduction
 
+Awhile ago, during my time at Centura Health, I began researching all the 
+different ways we could analyze the data at hand. And at some point I became 
+very interested in HR analytics. It was a facinating way to explore an orgnization
+through data. Of course, while digesting the org structure through newtwork graphs 
+is interesting there are also more immediatly clear benefits from employee data;
+predicting turnover.
+
+I came across this [article](https://www.business-science.io/business/2017/09/18/hr_employee_attrition.html)
+on using machine learning, specifically [h2o](https://www.h2o.ai/) and [Lime](https://arxiv.org/abs/1602.04938), 
+for turnover prediction and really liked the simplicity 
+of the features included, as well as, the author's explanation. After setting
+this exmaple aside for some time, I finally found the time to work through this
+example and peeking under the h2o hood attempt to replicate the results using [GLMNET](https://glmnet.stanford.edu/articles/glmnet.html).
+
+# The Data
+
+Unfortunately, the link to the data in the original article is broken. After a
+little bit of Googling I was able to find some conscientious Github repos with a
+copy. I did some checks and the data seemed to match the same as the article.
+Since I no longer remember where I found the data, it's hosted in my own repo now.
+
+**[Data](https://github.com/hoffmben/ML/tree/master/h2o/employee_attrition/data)**
+
 # EDA
+
+Here we'll look at the employee data and convert characters to factors.
 
 ```{r head table, results='asis', warning=FALSE}
 employee_attrition_raw %>% 
@@ -35,8 +60,38 @@ employee_attrition <- employee_attrition_raw %>%
   dplyr::select(Attrition, dplyr::everything())
 ```
 
+In total we have 1470 observations and 35 features. 
+
 ```{r check results}
 tibble::glimpse(employee_attrition, width = 100)
+```
+
+## Imbalance and Feature to Observation Ratio
+
+Let's take a quick look at the number of positive and negative cases to ensure
+we don't need to investigate sampling methods such as down/up sampling or synthetic sampling.
+
+```{r case balance}
+employee_attrition %>% 
+  dplyr::count(Attrition, name = "Count")
+```
+
+Although, we're letting H20 decide the optimal model for us let's still check
+we have enough observations per variable under a logistic regression model.
+
+Per [Peduzzi et al.](https://www.ncbi.nlm.nih.gov/pubmed/8970487) N = 10 * k / p, 
+where N is the number of observations, k is the number of features, and p is the number of cases.
+
+```{r feature balance}
+k <- length(colnames(employee_attrition[, -1]))
+p <- employee_attrition %>% 
+  dplyr::count(Attrition) %>% 
+  dplyr::mutate(prop = n / sum(n)) %>% 
+  {`[[`(., 3)[2]}
+
+N <- 10 * k / p
+
+N
 ```
 
 # Model Setup
