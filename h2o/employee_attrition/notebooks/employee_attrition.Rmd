@@ -145,7 +145,7 @@ automl_leader <- automl_models_h2o@leader
 
 # Evaluation
 
-Let's evaluate the models performance. 
+Let's evaluate the model's performance. 
 
 One interesting thing to note is at this step we're not even aware of the model H2O
 has selected. That's an interesting feature of the AutoML; we're focused on the 
