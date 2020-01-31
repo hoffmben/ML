@@ -19,16 +19,16 @@ employee_attrition_raw <- readr::read_csv('../data/WA_Fn-UseC_-HR-Employee-Attri
 
 Awhile ago, during my time at Centura Health, I began researching all the 
 different ways we could analyze the data at hand. And at some point I became 
-very interested in HR analytics. It was a facinating way to explore an orgnization
-through data. Of course, while digesting the org structure through newtwork graphs 
-is interesting there are also more immediatly clear benefits from employee data;
+very interested in HR analytics. It was a fascinating way to explore an organization
+through data. Of course, while digesting the org structure through network graphs 
+is interesting there are also more immediately clear benefits from employee data;
 predicting turnover.
 
 I came across this [article](https://www.business-science.io/business/2017/09/18/hr_employee_attrition.html)
 on using machine learning, specifically [h2o](https://www.h2o.ai/) and [Lime](https://arxiv.org/abs/1602.04938), 
 for turnover prediction and really liked the simplicity 
 of the features included, as well as, the author's explanation. After setting
-this exmaple aside for some time, I finally found the time to work through this
+this example aside for some time, I finally found the time to work through this
 example and peeking under the h2o hood attempt to replicate the results using [GLMNET](https://glmnet.stanford.edu/articles/glmnet.html).
 
 # The Data
@@ -72,9 +72,16 @@ Let's take a quick look at the number of positive and negative cases to ensure
 we don't need to investigate sampling methods such as down/up sampling or synthetic sampling.
 
 ```{r case balance}
-employee_attrition %>% 
-  dplyr::count(Attrition, name = "Count")
+case_table <- employee_attrition %>% 
+  dplyr::count(Attrition, name = "Count") %>% 
+  dplyr::mutate(prop = Count / sum(Count))
+
+case_table
 ```
+
+We do see we have some moderate observation imbalance. To keep consistent with 
+the analysis performed in the article we'll leave as is and note this for future
+analysis.
 
 Although, we're letting H20 decide the optimal model for us let's still check
 we have enough observations per variable under a logistic regression model.
@@ -84,9 +91,7 @@ where N is the number of observations, k is the number of features, and p is the
 
 ```{r feature balance}
 k <- length(colnames(employee_attrition[, -1]))
-p <- employee_attrition %>% 
-  dplyr::count(Attrition) %>% 
-  dplyr::mutate(prop = n / sum(n)) %>% 
+p <- case_table %>% 
   {`[[`(., 3)[2]}
 
 N <- 10 * k / p
@@ -94,7 +99,11 @@ N <- 10 * k / p
 N
 ```
 
+We see no issues with the number of features to observations.
+
 # Model Setup
+
+Here we'll setup our model and establish training, test, and validation sets.
 
 ```{r h2o init}
 h2o::h2o.init()
@@ -119,19 +128,28 @@ y <- "Attrition"
 x <- setdiff(names(train_h2o), y)
 ```
 
+Time for the modeling step!
+
 ```{r model, warning=FALSE}
 automl_models_h2o <- h2o::h2o.automl(
   x = x,
   y = y,
   training_frame = train_h2o,
   leaderboard_frame = valid_h2o,
-  max_runtime_secs = 30
+  max_runtime_secs = 30,
+  seed = 1234
 )
 
 automl_leader <- automl_models_h2o@leader
 ```
 
 # Evaluation
+
+Let's evaluate the models performance. 
+
+One interesting thing to note is at this step we're not even aware of the model H2O
+has selected. That's an interesting feature of the AutoML; we're focused on the 
+results instead of selecting features and optimizing parameters at this stage.
 
 ```{r predict}
 pred_h2o <- h2o::h2o.predict(object = automl_leader, newdata = test_h2o)
@@ -153,6 +171,15 @@ confusion_matrix <- test_performance %>%
 
 confusion_matrix
 ```
+
+Here I liked the authors pause to point out the high null error rate. You could 
+pick no and have an accuracy of ~77%. Having a ~10% between a naive no model and
+your actual model isn't great. However, the author goes on to point out recall's
+value to HR. The organization would prefer to missclassify employees as high risk
+when they're not versus missclassify as not high risk when they are. Too often the 
+focus on modeling is on accuracy and misses meaningfulness to the organization. 
+While our numbers differ slightly from those on the article, the organization 
+could possible keep 72% of employees predicted as high risk.
 
 ```{r performance}
 tn <- confusion_matrix[1]
@@ -176,11 +203,31 @@ tibble::tibble(
   t()
 ```
 
+# A Peek Under The Hood
+
+```{r}
+automl_leader
+```
+
+Of note, for the next section and unsurprisingly, we'll use the family, link,
+and regularization info.
+
 # GLMNET Comparison
 
+Since we noticed above the model H2O has selected is a glm model with ridge regression,
+we'll attempt to replicate the results using the GLMNET R package. And since 
+we're already doing a comparison, why not a few different types of regression, lasso,
+ridge, and elasticnet.
+
+Here we'll split our sample according to the same test and training sets we 
+used in our H2O model.
+
+I'll drop the feature Over18 since it's a constant factor and doesn't add any additional
+information to the outcome.
+
 ```{r glm split}
-x_train <- as.data.frame(train_h2o[x][, -c(21)])
-y_train <- as.data.frame(train_h2o[y])$Attrition
+x_train <- rbind(as.data.frame(train_h2o[x][, -c(21)]), as.data.frame(valid_h2o[x][, -c(21)]))
+y_train <- rbind(as.data.frame(train_h2o[y]), as.data.frame(valid_h2o[y]))$Attrition
 
 x_test <- as.data.frame(test_h2o[x][, -c(21)])
 y_test <- as.data.frame(test_h2o[y])$Attrition
@@ -192,45 +239,85 @@ x_train <- model.matrix(~.-1, x_train)
 x_test <- model.matrix(~.-1, x_test)
 ```
 
-```{r glm model}
-attrition_model_ridge <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
-                                           family = "binomial", 
-                                           alpha = 0,
-                                           type.measure = "mse"
-                                           )
+Since it's not apparent the value of alpha, although, we do have a hint (Ridge Regression),
+we'll perform a grid search over alpha.
 
-attrition_model_elastic <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
-                                             family = "binomial", 
-                                             alpha = 0.5,
-                                             type.measure = "mse"
-                                             )
+```{r alpha search}
+alpha_grid <- seq(0, 1, .1)
 
-attrition_model_lasso <- glmnet::cv.glmnet(x_train, as.factor(y_train), 
-                                           family = "binomial", 
-                                           alpha = 1,
-                                           type.measure = "mse"
-                                           )
+model_fits <- lapply(alpha_grid, function(alpha){
+  
+  set.seed(1234)
+  
+  glmnet::cv.glmnet(x_train, as.factor(y_train), 
+                    family = "binomial", 
+                    alpha = alpha,
+                    type.measure = "mse",
+                    nfolds = 20                      
+                    )
+  
+})
+
+mse_lambda_min <- lapply(model_fits, function(model){ 
+  
+  lambda_min_mse <- model$cvm[which(model$lambda == model$lambda.min) ]
+  
+  lambda_1se_mse <- model$cvm[which(model$lambda == model$lambda.1se) ]
+  
+  lambda_min <- model$lambda.min
+  
+  lambda_1se <- model$lambda.1se
+  
+  data.frame(lambda_min_mse = lambda_min_mse, lambda_min = lambda_min, lambda_1se_mse = lambda_1se_mse, lambda_1se = lambda_1se) 
+  })
+
+mse_lambda_min <- do.call(rbind, mse_lambda_min)
+
+mse_lambda_min$alpha <- alpha_grid
+
+mse_lambda_min
+```
+
+Interestingly, enough we do not see our value of lambda. There's a couple of reasons
+for this:
+
+- GLMNET picks a validation set at random whereas for the H2O model we specified this beforehand.
+- The [solver](http://docs.h2o.ai/h2o/latest-stable/h2o-docs/booklets/GLMBooklet.pdf) for our lambda search seems to be different from GLMNET.
+
+Regardless, we'll pick the lambda with the lowest mse for both lambda_min and lambda_1se and see how they compare.
+
+```{r glm models}
+
+glmnet_min <- glmnet::glmnet(x_train, as.factor(y_train), 
+                             family = "binomial", 
+                             alpha = 0.2,
+                             lambda = 0.005412513
+                             )
+
+glmnet_1se <- glmnet::glmnet(x_train, as.factor(y_train), 
+                             family = "binomial", 
+                             alpha = 0.4,
+                             lambda = 0.02299651
+                             )
+
 ```
 
 ```{r glm evaluation}
-attrition_ridge_pred <- predict(attrition_model_ridge, 
-                                s = "lambda.min",
-                                newx = x_test,
-                                type = "class"
-                                )
+glmnet_min_pred <- predict(glmnet_min, 
+                           s = "lambda.min",
+                           newx = x_test,
+                           type = "class"
+                           )
 
-attrition_elastic_pred <- predict(attrition_model_elastic, 
-                                  s = "lambda.min",
-                                  newx = x_test,
-                                  type = "class"
-                                  )
-
-attrition_lasso_pred <- predict(attrition_model_lasso, 
-                                  s = "lambda.min",
-                                  newx = x_test,
-                                  type = "class"
-                                  )
+glmnet_1se_pred <- predict(glmnet_1se, 
+                           s = "lambda.1se",
+                           newx = x_test,
+                           type = "class"
+                           )
 ```
+
+To make measure performance for our 2 models, we'll make it easy and create a 
+performance function.
 
 ```{r performance function}
 perfomance <- function(confusion_matrix) {
@@ -256,38 +343,57 @@ perfomance <- function(confusion_matrix) {
 }
 ```
 
+A quick look at our confusion matrix highlights a mixed recall.
 
 ```{r ridge confusion}
-ridge_confusion <- table(y_test, attrition_ridge_pred, dnn = c("Attrition", "Prediction"))
-ridge_confusion
+glmnet_min_confusion <- table(y_test, glmnet_min_pred, dnn = c("Attrition", "Prediction"))
+glmnet_min_confusion
 ```
+
+Compared to our H2O model, the accuracy is slightly higher. However,
+our recall is lower. The gap between our null error and accuracy has closed slightly.
 
 ```{r ridge performance}
-perfomance(ridge_confusion)
+perfomance(glmnet_min_confusion)
 ```
 
+Our 1se model has likewise traded in recall for precision. As you can see from 
+the confusion matrix the model is very certain when it predicts yes it's correct.
+However, we've closed the gap even more between our null error rate and accuracy.
 
 ```{r elastic confusion}
-elastic_confusion <- table(y_test, attrition_elastic_pred, dnn = c("Attrition", "Prediction"))
-elastic_confusion
+glmnet_1se_confusion <- table(y_test, glmnet_1se_pred, dnn = c("Attrition", "Prediction"))
+glmnet_1se_confusion
 ```
 
 ```{r elastic performance}
-perfomance(elastic_confusion)
+perfomance(glmnet_1se_confusion)
 ```
 
-```{r lasso confusion}
-lasso_confusion <- table(y_test, attrition_lasso_pred, dnn = c("Attrition", "Prediction"))
-lasso_confusion
-```
+## GLMNET Conclusions
 
-```{r lasso performance}
-perfomance(lasso_confusion)
-```
+Overall, the GLMNET model has similar results to the H2O model, but it does
+tend to focus more on accuracy and precision at the expense of recall. It's 
+important to keep these things in mind when developing a model and ensuring
+you're optimizing for the task at hand.
+
+We'll return now to the original article.
 
 # Feature Importance
 
-```{r lime setup, warning=FALSE}
+Here we'll use the lime package to feature importance plots. 
+
+Just to note an appealing aspect of lime is it being model agnostic. We can apply the same 
+technique regardless of it being random forest or neural network. 
+
+Since lime is still only a few years old I'll give a brief explanation of what lime does.
+The first step is taking one of our predicted observations and creating slight 
+perturbations of the original observation and finding the predictions using the original model.
+Finally, it fits a linear model based on the local characteristics of the model.
+
+## Lime Setup
+
+```{r lime setup, warning=FALSE, message=FALSE}
 require('lime')
 model_type.H2OBinomialModel <- function(x, ...) return('classification')
 
@@ -322,30 +428,66 @@ explanation <- lime::explain(
 )
 ```
 
+Let's take a look at the feature importance plots from lime. 
+
+Note these differ quite a bit from those found in the article. This highlights, 
+an important point about reproducibilty. Since the authors didn't disclose or set
+a seed value for the AutoML we cannot reproduce their results; it's been left up
+to chance. As you can see below the feature importance gives a very different perspective
+on the possible interventions of attrition.
+
 ```{r feature importance, fig.height=10, fig.width=10}
 lime::plot_features(explanation) + 
   ggplot2::labs(title = "Employee Attrition Prediction: Feature Importance",
        subtitle = "First 10 Cases From Test Set") 
 ```
 
+## Author's Feature Importance
+
+![](https://www.business-science.io/figure/source/2017-9-18-hr_employee_attrition/unnamed-chunk-26-1.png)
+
 # Feature Evaluation
+
+From the feature plots we generated, a few things stand out as important 
+features in which we can explore and possible create intervention plans.
 
 ```{r critical features}
 attrition_critical_features <- employee_attrition %>% 
   tibble::as_tibble() %>% 
-  dplyr::select(Attrition, TrainingTimesLastYear, JobRole, OverTime) %>% 
+  dplyr::select(Attrition, NumCompaniesWorked, YearsSinceLastPromotion, OverTime) %>% 
   dplyr::mutate(Case = dplyr::row_number()) %>% 
   dplyr::select(Case, dplyr::everything())
 
 attrition_critical_features
 ```
 
+## Number of Companies Worked
+
+We can see from the rankings that in general the more companies worked at the
+more inclined it is that the individual would leave. Oddly, I would have 
+assumed this to be monotonic and capture job hoppers. As an intervention, I'm not 
+sure what you could possible do; you can't do much about a person's previous job history.
+As a prehire check this could be useful information if you're looking for a long term employee.
+
 ```{r training plot, fig.height=6, fig.width=8}
 attrition_critical_features %>% 
-  ggplot2::ggplot(ggplot2::aes(Attrition, TrainingTimesLastYear)) +
-  ggplot2::geom_violin(trim=TRUE) +
-  ggplot2::geom_jitter(shape = 16, position = ggplot2::position_jitter(0.4))
+  dplyr::group_by(NumCompaniesWorked, Attrition) %>% 
+  dplyr::summarise(n = dplyr::n()) %>% 
+  dplyr::mutate(freq = n / sum(n)) %>%
+  dplyr::filter(Attrition == 'Yes') %>% 
+  ggplot2::ggplot(ggplot2::aes(forcats::fct_reorder(as.factor(NumCompaniesWorked), freq), freq)) +
+  ggplot2::geom_bar(stat = 'identity') +
+  ggplot2::coord_flip() +
+  ggplot2::ylim(0, 1) + 
+  ggplot2::ylab("Attrition Percentage (Yes / Total)") +
+  ggplot2::xlab("NumCompaniesWorked")
 ```
+
+## Orvetime
+
+No surprises here. A large number of employees who stay are not working overtime.
+Interventions here could include hiring more staff or offering incentives for those
+times when overtime is necessary.
 
 ```{r overtime plot, fig.height=6, fig.width=8}
 attrition_critical_features %>% 
@@ -355,17 +497,34 @@ attrition_critical_features %>%
   ggplot2::geom_jitter(shape = 16, position = ggplot2::position_jitter(0.4))
 ```
 
+## Years Since Last Promotion
+
+This is also interestingly not monotonic. It's clear at the top that employees leave if 
+they haven't been promoted for a long time.
+
+Possible interventions here would include promotions or in lieu of that recognition programs.
 
 ```{r job role plot, fig.height=6, fig.width=8}
 attrition_critical_features %>% 
-  dplyr::group_by(JobRole, Attrition) %>% 
+  dplyr::group_by(YearsSinceLastPromotion, Attrition) %>% 
   dplyr::summarise(n = dplyr::n()) %>% 
   dplyr::mutate(freq = n / sum(n)) %>%
   dplyr::filter(Attrition == 'Yes') %>% 
-  ggplot2::ggplot(ggplot2::aes(forcats::fct_reorder(JobRole, freq), freq)) +
+  ggplot2::ggplot(ggplot2::aes(forcats::fct_reorder(as.factor(YearsSinceLastPromotion), freq), freq)) +
   ggplot2::geom_bar(stat = 'identity') +
   ggplot2::coord_flip() +
   ggplot2::ylim(0, 1) + 
   ggplot2::ylab("Attrition Percentage (Yes / Total)") +
-  ggplot2::xlab("JobRole")
+  ggplot2::xlab("YearsSinceLastPromotion")
 ```
+
+# Conclusion
+
+Working through this example has been interesting. Not only were we able to explore
+interesting employee data, but also see how models compare and the pitfalls of not
+ensuring your work is reproducible.
+
+```{r h2o shutdown, include=FALSE}
+h2o::h2o.shutdown(prompt = FALSE)
+```
+
