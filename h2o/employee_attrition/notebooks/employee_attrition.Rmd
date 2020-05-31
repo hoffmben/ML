@@ -483,7 +483,7 @@ attrition_critical_features %>%
   ggplot2::xlab("NumCompaniesWorked")
 ```
 
-## Orvetime
+## Overtime
 
 No surprises here. A large number of employees who stay are not working overtime.
 Interventions here could include hiring more staff or offering incentives for those
